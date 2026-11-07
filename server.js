@@ -30,7 +30,7 @@ async function sendEmailNotification(to, subject, text) {
   if (!process.env.EMAIL_USER) return;
   try {
     await transporter.sendMail({
-      from: `"NexusConnect ERP" <${process.env.EMAIL_USER}>`,
+      from: `"Euro AS Company ERP" <${process.env.EMAIL_USER}>`,
       to, subject, text
     });
   } catch (err) {
@@ -46,6 +46,7 @@ async function initDB() {
         name VARCHAR(100) NOT NULL,
         email VARCHAR(100) UNIQUE NOT NULL,
         role VARCHAR(50) DEFAULT 'employee',
+        salary NUMERIC(12,2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS messages (
@@ -59,7 +60,7 @@ async function initDB() {
         id SERIAL PRIMARY KEY,
         title VARCHAR(255) NOT NULL,
         category VARCHAR(100) NOT NULL,
-        type VARCHAR(20) DEFAULT 'Rashod', -- 'Rashod' ili 'Prihod'
+        type VARCHAR(20) DEFAULT 'Rashod',
         amount NUMERIC(12,2) DEFAULT 0,
         status VARCHAR(50) DEFAULT 'Na čekanju',
         file_data TEXT NOT NULL,
@@ -75,11 +76,19 @@ async function initDB() {
         status VARCHAR(50) DEFAULT 'Aktivan',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS vehicles (
+        id SERIAL PRIMARY KEY,
+        plate VARCHAR(50) NOT NULL,
+        model VARCHAR(100) NOT NULL,
+        reg_expiry DATE NOT NULL,
+        service_km INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
     `);
     
     const userCheck = await pool.query('SELECT COUNT(*) FROM users');
     if (parseInt(userCheck.rows[0].count) === 0) {
-      await pool.query(`INSERT INTO users (name, email, role) VALUES ('Jovan (Admin)', 'jovan@firma.com', 'admin')`);
+      await pool.query(`INSERT INTO users (name, email, role, salary) VALUES ('Jovan (Admin)', 'admin@euroas.com', 'admin', 120000)`);
     }
   } catch (err) {
     console.error("Greška pri inicijalizaciji baze:", err);
@@ -88,15 +97,15 @@ async function initDB() {
 initDB();
 
 app.get('/', (req, res) => {
-  res.send('NexusConnect Enterprise ERP Backend radi uspešno!');
+  res.send('Euro AS Company ERP Backend radi uspešno sa svim modulima!');
 });
 
 app.post('/api/users', async (req, res) => {
   try {
-    const { name, email, role } = req.body;
+    const { name, email, role, salary } = req.body;
     const result = await pool.query(
-      `INSERT INTO users (name, email, role) VALUES ($1, $2, $3) RETURNING *`,
-      [name, email, role || 'employee']
+      `INSERT INTO users (name, email, role, salary) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [name, email, role || 'employee', salary || 0]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -163,7 +172,6 @@ app.patch('/api/documents/:id/status', async (req, res) => {
   }
 });
 
-// Ugovori rute
 app.get('/api/contracts', async (req, res) => {
   try {
     const result = await pool.query(`SELECT * FROM contracts ORDER BY expiry_date ASC`);
@@ -179,6 +187,29 @@ app.post('/api/contracts', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO contracts (title, partner, expiry_date) VALUES ($1, $2, $3) RETURNING *`,
       [title, partner, expiryDate]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Vozni Park Rute
+app.get('/api/vehicles', async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM vehicles ORDER BY reg_expiry ASC`);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/vehicles', async (req, res) => {
+  try {
+    const { plate, model, regExpiry, serviceKm } = req.body;
+    const result = await pool.query(
+      `INSERT INTO vehicles (plate, model, reg_expiry, service_km) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [plate, model, regExpiry, serviceKm || 0]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -237,5 +268,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`Server radi na portu ${PORT}`);
+  console.log(`Euro AS ERP Server radi na portu ${PORT}`);
 });
