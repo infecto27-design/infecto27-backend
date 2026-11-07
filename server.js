@@ -3,11 +3,12 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // Povećano ograničenje za upload slika i fajlova
+app.use(express.json({ limit: '15mb' }));
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -17,7 +18,27 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Provera i automatsko kreiranje tabela ako ne postoje
+// Podešavanje email transportera (možeš podesiti svoje SMTP podatke u .env)
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER || 'tvoj-email@gmail.com',
+    pass: process.env.EMAIL_PASS || 'tvoja-lozinka-aplikacije'
+  }
+});
+
+async function sendEmailNotification(to, subject, text) {
+  if (!process.env.EMAIL_USER) return; // Preskače ako nisu podešeni kredencijali
+  try {
+    await transporter.sendMail({
+      from: `"NexusConnect ERP" <${process.env.EMAIL_USER}>`,
+      to, subject, text
+    });
+  } catch (err) {
+    console.error("Greška pri slanju emaila:", err.message);
+  }
+}
+
 async function initDB() {
   try {
     await pool.query(`
@@ -39,6 +60,7 @@ async function initDB() {
         id SERIAL PRIMARY KEY,
         title VARCHAR(255) NOT NULL,
         category VARCHAR(100) NOT NULL,
+        amount NUMERIC(12,2) DEFAULT 0,
         file_data TEXT NOT NULL,
         file_name VARCHAR(255) NOT NULL,
         uploaded_by INT REFERENCES users(id),
@@ -46,12 +68,10 @@ async function initDB() {
       );
     `);
     
-    // Ubaci podrazumevanog korisnika ako nema nijednog
     const userCheck = await pool.query('SELECT COUNT(*) FROM users');
     if (parseInt(userCheck.rows[0].count) === 0) {
       await pool.query(`INSERT INTO users (name, email, role) VALUES ('Jovan (Zaposleni)', 'jovan@firma.com', 'employee')`);
     }
-    console.log("Baza uspešno inicijalizovana!");
   } catch (err) {
     console.error("Greška pri inicijalizaciji baze:", err);
   }
@@ -59,10 +79,9 @@ async function initDB() {
 initDB();
 
 app.get('/', (req, res) => {
-  res.send('NexusConnect Backend radi uspešno sa dokumentima i korisnicima!');
+  res.send('NexusConnect ERP Backend radi sa emailom i notifikacijama!');
 });
 
-// Ruta za dodavanje novog korisnika
 app.post('/api/users', async (req, res) => {
   try {
     const { name, email, role } = req.body;
@@ -76,7 +95,6 @@ app.post('/api/users', async (req, res) => {
   }
 });
 
-// Ruta za preuzimanje liste korisnika
 app.get('/api/users', async (req, res) => {
   try {
     const result = await pool.query(`SELECT * FROM users ORDER BY id ASC`);
@@ -86,11 +104,10 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-// Ruta za preuzimanje dokumenata/faktura/računa
 app.get('/api/documents', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.id, d.title, d.category, d.file_data, d.file_name, u.name as uploader, TO_CHAR(d.created_at, 'DD.MM.YYYY HH24:MI') as timestamp 
+      `SELECT d.id, d.title, d.category, d.amount, d.file_data, d.file_name, u.name as uploader, TO_CHAR(d.created_at, 'DD.MM.YYYY HH24:MI') as timestamp 
        FROM documents d JOIN users u ON d.uploaded_by = u.id 
        ORDER BY d.created_at DESC`
     );
@@ -100,21 +117,26 @@ app.get('/api/documents', async (req, res) => {
   }
 });
 
-// Ruta za upload novog dokumenta/računa/otpremnice
 app.post('/api/documents', async (req, res) => {
   try {
-    const { title, category, fileData, fileName, userId } = req.body;
+    const { title, category, amount, fileData, fileName, userId } = req.body;
     const result = await pool.query(
-      `INSERT INTO documents (title, category, file_data, file_name, uploaded_by) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [title, category, fileData, fileName, userId]
+      `INSERT INTO documents (title, category, amount, file_data, file_name, uploaded_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [title, category, amount || 0, fileData, fileName, userId]
     );
+
+    // Notifikacija u realnom vremenu svim konektovanim korisnicima
+    io.emit('new_notification', {
+      type: 'document',
+      text: `Novi dokument sačuvan: ${title} (${amount} RSD)`
+    });
+
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Socket.io za real-time chat
 io.on('connection', (socket) => {
   socket.on('join_channel', async (channel) => {
     socket.join(channel);
@@ -126,9 +148,7 @@ io.on('connection', (socket) => {
         [channel]
       );
       socket.emit('load_messages', result.rows);
-    } catch (err) {
-      console.error(err);
-    }
+    } catch (err) { console.error(err); }
   });
 
   socket.on('send_message', async (data) => {
@@ -138,7 +158,6 @@ io.on('connection', (socket) => {
         `INSERT INTO messages (channel_name, user_id, content) VALUES ($1, $2, $3) RETURNING id, created_at`,
         [channel, userId, content]
       );
-      
       const userRes = await pool.query(`SELECT name FROM users WHERE id = $1`, [userId]);
 
       const newMessage = {
@@ -149,13 +168,28 @@ io.on('connection', (socket) => {
       };
 
       io.to(channel).emit('receive_message', newMessage);
-    } catch (err) {
-      console.error("Greška pri čuvanju poruke:", err);
+
+      // Notifikacija za nove poruke izvan kanala
+      socket.broadcast.emit('new_notification', {
+        type: 'chat',
+        text: `Nova poruka od ${newMessage.user} u #${channel}`
+      });
+    } catch (err) { console.error("Greška pri čuvanju poruke:", err); }
+  });
+
+  socket.on('assign_task', (data) => {
+    io.emit('new_notification', {
+      type: 'task',
+      text: `Novi zadatak dodeljen: ${data.title} (${data.assignee})`
+    });
+    // Šalje email notifikaciju ako imamo email primaoca
+    if (data.assigneeEmail) {
+      sendEmailNotification(data.assigneeEmail, 'Novi zadatak u NexusConnect-u', `Dodeljen vam je zadatak: ${data.title}\nDetalji: ${data.desc}`);
     }
   });
 });
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`Server radi na portu ${PORT}`);
+  console.log(`ERP Server radi na portu ${PORT}`);
 });
